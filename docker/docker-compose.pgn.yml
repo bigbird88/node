@@ -19,7 +19,7 @@ services:
       postgres_pass: let-me-in
       postgres_db: graph-node
       ipfs: 'ipfs:5001'
-      ethereum: 'pgn:https://rpc.publicgoods.network'
+      ethereum: 'pgn-mainnet:https://rpc.publicgoods.network'
 #      GRAPH_LOG: WARN
   ipfs:
     image: ipfs/go-ipfs:v0.10.0

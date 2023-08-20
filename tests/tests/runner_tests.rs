@@ -16,7 +16,10 @@ use graph::prelude::ethabi::ethereum_types::H256;
 use graph::prelude::{
     CheapClone, DeploymentHash, SubgraphAssignmentProvider, SubgraphName, SubgraphStore,
 };
-use graph_tests::fixture::ethereum::{chain, empty_block, genesis, push_test_log};
+use graph_tests::fixture::ethereum::{
+    chain, empty_block, generate_empty_blocks_for_range, genesis, push_test_log,
+    push_test_polling_trigger,
+};
 use graph_tests::fixture::{
     self, stores, test_ptr, test_ptr_reorged, MockAdapterSelector, NoopAdapterSelector, Stores,
 };
@@ -143,6 +146,165 @@ async fn typename() -> anyhow::Result<()> {
     ctx.start_and_sync_to(stop_block).await;
 
     Ok(())
+}
+
+#[tokio::test]
+async fn derived_loaders() {
+    let RunnerTestRecipe {
+        stores,
+        subgraph_name,
+        hash,
+    } = RunnerTestRecipe::new("derived-loaders").await;
+
+    let blocks = {
+        let block_0 = genesis();
+        let mut block_1 = empty_block(block_0.ptr(), test_ptr(1));
+        push_test_log(&mut block_1, "1_0");
+        push_test_log(&mut block_1, "1_1");
+        let mut block_2 = empty_block(block_1.ptr(), test_ptr(2));
+        push_test_log(&mut block_2, "2_0");
+        vec![block_0, block_1, block_2]
+    };
+
+    let stop_block = blocks.last().unwrap().block.ptr();
+
+    let chain = chain(blocks, &stores, None).await;
+    let ctx = fixture::setup(subgraph_name.clone(), &hash, &stores, &chain, None, None).await;
+
+    ctx.start_and_sync_to(stop_block).await;
+
+    // This test tests that derived loaders work correctly.
+    // The test fixture has 2 entities, `Bar` and `BBar`, which are derived from `Foo` and `BFoo`.
+    // Where `Foo` and `BFoo` are the same entity, but `BFoo` uses Bytes as the ID type.
+    // This test tests multiple edge cases of derived loaders:
+    // - The derived loader is used in the same handler as the entity is created.
+    // - The derived loader is used in the same block as the entity is created.
+    // - The derived loader is used in a later block than the entity is created.
+    // This is to test the cases where the entities are loaded from the store, `EntityCache.updates` and `EntityCache.handler_updates`
+    // It also tests cases where derived entities are updated and deleted when
+    // in same handler, same block and later block as the entity is created/updated.
+    // For more details on the test cases, see `tests/runner-tests/derived-loaders/src/mapping.ts`
+    // Where the test cases are documented in the code.
+
+    let query_res = ctx
+    .query(&format!(
+        r#"{{ testResult(id:"1_0", block: {{ number: 1 }} ){{ id barDerived{{id value value2}} bBarDerived{{id value value2}} }} }}"#,
+    ))
+    .await
+    .unwrap();
+
+    assert_json_eq!(
+        query_res,
+        Some(object! {
+            testResult: object! {
+                id: "1_0",
+                barDerived: vec![
+                    object! {
+                        id: "0_1_0",
+                        value: "0",
+                        value2: "0"
+                    },
+                    object! {
+                        id: "1_1_0",
+                        value: "0",
+                        value2: "0"
+                    },
+                    object! {
+                        id: "2_1_0",
+                        value: "0",
+                        value2: "0"
+                    }
+                ],
+                bBarDerived: vec![
+                    object! {
+                        id: "0x305f315f30",
+                        value: "0",
+                        value2: "0"
+                    },
+                    object! {
+                        id: "0x315f315f30",
+                        value: "0",
+                        value2: "0"
+                    },
+                    object! {
+                        id: "0x325f315f30",
+                        value: "0",
+                        value2: "0"
+                    }
+                ]
+            }
+        })
+    );
+
+    let query_res = ctx
+    .query(&format!(
+        r#"{{ testResult(id:"1_1", block: {{ number: 1 }} ){{ id barDerived{{id value value2}} bBarDerived{{id value value2}} }} }}"#,
+    ))
+    .await
+    .unwrap();
+
+    assert_json_eq!(
+        query_res,
+        Some(object! {
+            testResult: object! {
+                id: "1_1",
+                barDerived: vec![
+                    object! {
+                        id: "0_1_1",
+                        value: "1",
+                        value2: "0"
+                    },
+                    object! {
+                        id: "2_1_1",
+                        value: "0",
+                        value2: "0"
+                    }
+                ],
+                bBarDerived: vec![
+                    object! {
+                        id: "0x305f315f31",
+                        value: "1",
+                        value2: "0"
+                    },
+                    object! {
+                        id: "0x325f315f31",
+                        value: "0",
+                        value2: "0"
+                    }
+                ]
+            }
+        })
+    );
+
+    let query_res = ctx.query(
+    &format!(
+        r#"{{ testResult(id:"2_0" ){{ id barDerived{{id value value2}} bBarDerived{{id value value2}} }} }}"#
+    )
+)
+.await
+.unwrap();
+    assert_json_eq!(
+        query_res,
+        Some(object! {
+            testResult: object! {
+                id: "2_0",
+                barDerived: vec![
+                    object! {
+                        id: "0_2_0",
+                        value: "2",
+                        value2: "0"
+                    }
+                ],
+                bBarDerived: vec![
+                    object! {
+                        id: "0x305f325f30",
+                        value: "2",
+                        value2: "0"
+                    }
+                ]
+            }
+        })
+    );
 }
 
 #[tokio::test]
@@ -348,6 +510,141 @@ async fn file_data_sources() {
                 .to_string();
         assert_eq!(err.to_string(), message);
     }
+}
+
+#[tokio::test]
+async fn block_handlers() {
+    let RunnerTestRecipe {
+        stores,
+        subgraph_name,
+        hash,
+    } = RunnerTestRecipe::new("block-handlers").await;
+
+    let blocks = {
+        let block_0 = genesis();
+        let block_1_to_3 = generate_empty_blocks_for_range(block_0.ptr(), 1, 3);
+        let block_4 = {
+            let mut block = empty_block(block_1_to_3.last().unwrap().ptr(), test_ptr(4));
+            push_test_polling_trigger(&mut block);
+            push_test_log(&mut block, "create_template");
+            block
+        };
+        let block_5 = {
+            let mut block = empty_block(block_4.ptr(), test_ptr(5));
+            push_test_polling_trigger(&mut block);
+            block
+        };
+        let block_6 = {
+            let mut block = empty_block(block_5.ptr(), test_ptr(6));
+            push_test_polling_trigger(&mut block);
+            block
+        };
+        let block_7 = {
+            let mut block = empty_block(block_6.ptr(), test_ptr(7));
+            push_test_polling_trigger(&mut block);
+            block
+        };
+        let block_8 = {
+            let mut block = empty_block(block_7.ptr(), test_ptr(8));
+            push_test_polling_trigger(&mut block);
+            block
+        };
+        let block_9 = {
+            let mut block = empty_block(block_8.ptr(), test_ptr(9));
+            push_test_polling_trigger(&mut block);
+            block
+        };
+        let block_10 = {
+            let mut block = empty_block(block_9.ptr(), test_ptr(10));
+            push_test_polling_trigger(&mut block);
+            block
+        };
+
+        // return the blocks
+        vec![block_0]
+            .into_iter()
+            .chain(block_1_to_3)
+            .chain(vec![
+                block_4, block_5, block_6, block_7, block_8, block_9, block_10,
+            ])
+            .collect()
+    };
+
+    let chain = chain(blocks, &stores, None).await;
+
+    let mut env_vars = EnvVars::default();
+    env_vars.experimental_static_filters = true;
+
+    let ctx = fixture::setup(
+        subgraph_name.clone(),
+        &hash,
+        &stores,
+        &chain,
+        None,
+        Some(env_vars),
+    )
+    .await;
+
+    ctx.start_and_sync_to(test_ptr(10)).await;
+
+    let query = format!(
+        r#"{{ blockFromPollingHandlers(first: {first}) {{ id, hash }} }}"#,
+        first = 3
+    );
+    let query_res = ctx.query(&query).await.unwrap();
+
+    assert_eq!(
+        query_res,
+        Some(object! {
+            blockFromPollingHandlers: vec![
+                object! {
+                    id: test_ptr(0).number.to_string(),
+                    hash:format!("0x{}",test_ptr(0).hash_hex()) ,
+                },
+                object! {
+                id: test_ptr(4).number.to_string(),
+                hash:format!("0x{}",test_ptr(4).hash_hex()) ,
+                },
+                object! {
+                    id: test_ptr(8).number.to_string(),
+                    hash:format!("0x{}",test_ptr(8).hash_hex()) ,
+                },
+            ]
+        })
+    );
+
+    let query = format!(
+        r#"{{ blockFromOtherPollingHandlers(first: {first}, orderBy: number) {{ id, hash }} }}"#,
+        first = 4
+    );
+    let query_res = ctx.query(&query).await.unwrap();
+
+    assert_eq!(
+        query_res,
+        Some(object! {
+            blockFromOtherPollingHandlers: vec![
+                // TODO: The block in which the handler was created is not included
+                // in the result. This is because for runner tests we mock the triggers_adapter
+                // A mock triggers adapter which can be used here is to be implemented
+                // object! {
+                //     id: test_ptr(4).number.to_string(),
+                //     hash:format!("0x{}",test_ptr(10).hash_hex()) ,
+                // },
+                object!{
+                    id: test_ptr(6).number.to_string(),
+                    hash:format!("0x{}",test_ptr(6).hash_hex()) ,
+                },
+                object!{
+                    id: test_ptr(8).number.to_string(),
+                    hash:format!("0x{}",test_ptr(8).hash_hex()) ,
+                },
+                object!{
+                    id: test_ptr(10).number.to_string(),
+                    hash:format!("0x{}",test_ptr(10).hash_hex()) ,
+                },
+            ]
+        })
+    );
 }
 
 #[tokio::test]

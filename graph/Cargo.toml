@@ -39,13 +39,13 @@ slog = { version = "2.7.0", features = ["release_max_level_trace", "max_level_tr
 stable-hash_legacy = { version = "0.3.3", package = "stable-hash" }
 stable-hash = { version = "0.4.2" }
 strum = "0.21.0"
-strum_macros = "0.21.1"
+strum_macros = "0.25.2"
 slog-async = "2.5.0"
 slog-envlogger = "2.1.0"
 slog-term = "2.7.0"
 petgraph = "0.6.3"
 tiny-keccak = "1.5.0"
-tokio = { version = "1.29.1", features = ["time", "sync", "macros", "test-util", "rt-multi-thread", "parking_lot"] }
+tokio = { version = "1.31.0", features = ["time", "sync", "macros", "test-util", "rt-multi-thread", "parking_lot"] }
 tokio-stream = { version = "0.1.14", features = ["sync"] }
 tokio-retry = "0.3.0"
 toml = "0.7.6"
